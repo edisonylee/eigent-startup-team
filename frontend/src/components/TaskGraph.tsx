@@ -1,14 +1,16 @@
 import { useMemo } from "react";
 import ReactFlow, { Background, Edge, Node } from "reactflow";
-import { ROLE_ORDER, useStore } from "../store";
+import { ROLE_ORDER, Role, useStore } from "../store";
 import WorkerNode from "./WorkerNode";
 
 const nodeTypes = { worker: WorkerNode };
+const WORKER_IDS = new Set<string>(ROLE_ORDER);
 
 /** Live node graph of the Workforce: coordinator → 4 workers → memo. */
 export default function TaskGraph() {
   const workers = useStore((s) => s.workers);
   const phase = useStore((s) => s.phase);
+  const setExpanded = useStore((s) => s.setExpanded);
 
   const nodes: Node[] = useMemo(() => {
     const xs = [20, 250, 480, 710];
@@ -94,7 +96,9 @@ export default function TaskGraph() {
         fitView
         nodesConnectable={false}
         nodesDraggable={false}
-        elementsSelectable={false}
+        onNodeClick={(_, node) => {
+          if (WORKER_IDS.has(node.id)) setExpanded(node.id as Role);
+        }}
         proOptions={{ hideAttribution: true }}
       >
         <Background color="#e7e5e4" />

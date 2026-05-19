@@ -19,11 +19,18 @@ def _model(stream: bool = False):
 
     stream=True enables token streaming so the Workforce stream callback emits
     incremental chunks (used by the web UI). The CLI leaves it False.
+
+    `stream_options.include_usage=True` is required to receive token usage in
+    streaming responses — otherwise the `on_request_usage` callback fires with
+    zeros, and the live cost ticker stays at $0.
     """
+    config: dict = {"temperature": 0.2, "stream": stream}
+    if stream:
+        config["stream_options"] = {"include_usage": True}
     return ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=ModelType.GPT_4O,
-        model_config_dict={"temperature": 0.2, "stream": stream},
+        model_config_dict=config,
     )
 
 

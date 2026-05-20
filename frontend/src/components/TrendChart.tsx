@@ -1,13 +1,12 @@
-// Stacked-bar 28-day trend strip showing per-category event counts.
-// Sits directly under the CalendarStrip — the two share the same window
-// computed by `calendarWindow()` so a bar lines up with its calendar cell.
-//
-// Hover a day → tooltip with that day's per-category breakdown.
+// Per-category stacked-bar trend strip for the visible month. Lives directly
+// under the CalendarStrip and uses the same (year, month) props so a bar
+// aligns conceptually with its calendar cell. Hover a day → breakdown line.
 
 import { useMemo, useState } from "react";
 import { EVENT_CATEGORIES, EventCategory } from "../lib/api";
 import { useCategoryCounts } from "../lib/queries";
-import { CATEGORY_COLOR, calendarWindow } from "./CalendarStrip";
+import { Card } from "./ui/Card";
+import { CATEGORY_COLOR, monthGrid } from "./CalendarStrip";
 
 const CATEGORY_LABEL: Record<EventCategory, string> = {
   symptom: "Symptom",
@@ -20,25 +19,35 @@ const CATEGORY_LABEL: Record<EventCategory, string> = {
   note: "Note",
 };
 
-// Fill colors used inline (SVG <rect>) — mirrors CATEGORY_COLOR tailwind classes.
+// SVG <rect> fills — must visually match CATEGORY_COLOR (which uses
+// Tailwind bg-classes pointing at the same CSS vars).
 const CATEGORY_FILL: Record<EventCategory, string> = {
   symptom: "var(--color-status-error)",
   meal: "var(--color-fire-orange)",
   sleep: "var(--color-code-blue)",
   exercise: "var(--color-status-done)",
-  supplement: "var(--color-code-blue)",
-  medication: "var(--color-fire-orange)",
-  mood: "var(--color-fire-orange)",
+  supplement: "var(--color-pale-sienna)",
+  medication: "var(--color-powder-pink)",
+  mood: "var(--color-stone-gray)",
   note: "var(--color-silver-mist)",
 };
 
-export default function TrendChart() {
-  const { start, end, days } = useMemo(() => calendarWindow(), []);
-  const { data: counts } = useCategoryCounts(start, end);
+interface Props {
+  year: number;
+  month: number; // 0-indexed
+}
+
+export default function TrendChart({ year, month }: Props) {
+  const grid = useMemo(() => monthGrid(year, month), [year, month]);
+  // Trend shows only the in-month days (not the leading/trailing padding).
+  const days = useMemo(
+    () => grid.cells.filter((c) => c.inMonth).map((c) => c.day),
+    [grid],
+  );
+  const { data: counts } = useCategoryCounts(grid.start, grid.end);
   const [hidden, setHidden] = useState<Set<EventCategory>>(new Set());
   const [hover, setHover] = useState<string | null>(null);
 
-  // Pivot to day -> category -> n.
   const byDay = useMemo(() => {
     const m = new Map<string, Map<EventCategory, number>>();
     for (const r of counts || []) {
@@ -49,7 +58,6 @@ export default function TrendChart() {
     return m;
   }, [counts]);
 
-  // Day totals (after applying filter) — used to size bar heights.
   const dayTotal = (day: string): number => {
     const inner = byDay.get(day);
     if (!inner) return 0;
@@ -61,25 +69,29 @@ export default function TrendChart() {
   };
 
   const max = Math.max(1, ...days.map(dayTotal));
-  // Per-day total across the visible window — small headline number.
   const windowTotal = days.reduce((a, d) => a + dayTotal(d), 0);
 
+  // Variable bar width based on day count (28-31) inside a fixed 280px viewBox.
+  const colWidth = 280 / days.length;
+  const barWidth = Math.max(4, colWidth - 1);
+  const barInset = (colWidth - barWidth) / 2;
+
   return (
-    <div className="mb-5 rounded-card border border-frost-gray bg-paper-white/60 p-4">
+    <Card surface="paper" className="mb-5">
       <div className="mb-3 flex items-baseline justify-between">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.18em] text-slate-gray">
-            Trend · per-category counts
+          <div className="text-[10px] uppercase tracking-[0.18em] text-stone-gray">
+            Trend · {grid.label}
           </div>
-          <div className="mt-0.5 font-mono text-[11px] text-silver-mist">
-            {windowTotal} event{windowTotal === 1 ? "" : "s"} across 28 days
+          <div className="mt-0.5 font-mono text-[11px] text-slate-gray">
+            {windowTotal} event{windowTotal === 1 ? "" : "s"}
           </div>
         </div>
         {hidden.size > 0 && (
           <button
             type="button"
             onClick={() => setHidden(new Set())}
-            className="rounded-pill border border-stone-gray/40 px-3 py-1 text-[11px] text-ink-black hover:bg-paper-white/5"
+            className="rounded-pill border border-frost-gray px-3 py-1 text-[11px] text-ink-black hover:bg-paper-white"
           >
             Show all
           </button>
@@ -89,23 +101,24 @@ export default function TrendChart() {
       <svg
         viewBox="0 0 280 64"
         preserveAspectRatio="none"
-        className="h-16 w-full"
+        className="h-20 w-full"
         role="img"
-        aria-label="28-day stacked event counts"
+        aria-label={`${grid.label} stacked event counts`}
         onMouseLeave={() => setHover(null)}
       >
+        {/* baseline */}
+        <line x1={0} x2={280} y1={62} y2={62} stroke="var(--color-frost-gray)" strokeWidth={0.5} />
         {days.map((day, i) => {
           const inner = byDay.get(day);
-          const x = i * 10 + 0.5; // 9px-wide bar + 1px gap inside 280 viewBox
+          const x = i * colWidth + barInset;
           const total = dayTotal(day);
           if (total === 0) {
-            // Empty-day baseline tick.
             return (
               <rect
                 key={day}
                 x={x}
-                y={62}
-                width={9}
+                y={61}
+                width={barWidth}
                 height={1}
                 fill="var(--color-frost-gray)"
                 onMouseEnter={() => setHover(day)}
@@ -124,21 +137,20 @@ export default function TrendChart() {
                 key={`${day}-${cat}`}
                 x={x}
                 y={cursor}
-                width={9}
+                width={barWidth}
                 height={h}
                 fill={CATEGORY_FILL[cat]}
-                opacity={hover && hover !== day ? 0.45 : 0.95}
+                opacity={hover && hover !== day ? 0.4 : 1}
               />,
             ];
           });
           return (
             <g key={day} onMouseEnter={() => setHover(day)}>
               {segs}
-              {/* invisible hit-target spans the full column height */}
               <rect
-                x={x - 0.5}
+                x={i * colWidth}
                 y={0}
-                width={10}
+                width={colWidth}
                 height={62}
                 fill="transparent"
               />
@@ -147,16 +159,14 @@ export default function TrendChart() {
         })}
       </svg>
 
-      {/* Hover detail line — keeps the surface compact instead of a popover */}
-      <div className="mt-1 min-h-[18px] font-mono text-[11px] text-silver-mist">
+      <div className="mt-1 min-h-[18px] font-mono text-[11px] text-slate-gray">
         {hover ? (
           <HoverDetail day={hover} inner={byDay.get(hover)} hidden={hidden} />
         ) : (
-          <span className="text-silver-mist/70">hover a day for a breakdown</span>
+          <span className="text-silver-mist">hover a day for a breakdown</span>
         )}
       </div>
 
-      {/* Legend / filter — click to toggle a category */}
       <div className="mt-3 flex flex-wrap gap-1.5">
         {EVENT_CATEGORIES.map((cat) => {
           const off = hidden.has(cat);
@@ -174,22 +184,22 @@ export default function TrendChart() {
               }
               className={
                 "flex items-center gap-1.5 rounded-pill border px-2 py-0.5 " +
-                "text-[10px] transition-[opacity,border-color] " +
+                "text-[10px] transition-[opacity,border-color,background-color] " +
                 (off
-                  ? "border-frost-gray text-slate-gray opacity-60"
-                  : "border-stone-gray/30 text-ink-black hover:bg-paper-white/5")
+                  ? "border-frost-gray text-silver-mist opacity-60"
+                  : "border-frost-gray bg-elevated-white text-ink-black hover:border-fire-orange/50")
               }
               title={off ? `Show ${cat}` : `Hide ${cat}`}
             >
               <span
-                className={`h-2 w-2 rounded-full ${CATEGORY_COLOR[cat]} ${off ? "opacity-40" : ""}`}
+                className={`h-2.5 w-2.5 rounded-full ${CATEGORY_COLOR[cat]} ${off ? "opacity-40" : ""}`}
               />
               {CATEGORY_LABEL[cat]}
             </button>
           );
         })}
       </div>
-    </div>
+    </Card>
   );
 }
 

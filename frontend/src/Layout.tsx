@@ -64,8 +64,8 @@ export default function Layout() {
                 className={({ isActive }) =>
                   "rounded-default px-3 py-1.5 transition-colors " +
                   (isActive
-                    ? "bg-paper-white text-cloud-canvas"
-                    : "text-slate-gray hover:bg-paper-white/5 hover:text-ink-black")
+                    ? "bg-ink-black text-paper-white"
+                    : "text-slate-gray hover:bg-paper-white hover:text-ink-black")
                 }
               >
                 {n.label}

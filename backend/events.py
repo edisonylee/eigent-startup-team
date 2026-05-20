@@ -34,6 +34,7 @@ class RunEvent(BaseModel):
     # worker_usage:
     prompt_tokens: Optional[int] = None  # cumulative for this worker
     completion_tokens: Optional[int] = None  # cumulative for this worker
+    cached_tokens: Optional[int] = None  # cumulative cached input tokens
     cost: Optional[float] = None  # cumulative for this worker, USD
     # tool_call:
     tool_name: Optional[str] = None

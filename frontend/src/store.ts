@@ -36,6 +36,7 @@ export interface RunEvent {
   memo?: string;
   prompt_tokens?: number;
   completion_tokens?: number;
+  cached_tokens?: number;
   cost?: number;
   tool_name?: string;
   tool_query?: string;
@@ -92,6 +93,7 @@ interface WorkerState {
   text: string;
   promptTokens: number;
   completionTokens: number;
+  cachedTokens: number;
   cost: number;
   toolCalls: ToolCall[];
 }
@@ -149,6 +151,7 @@ const freshWorker = (): WorkerState => ({
   text: "",
   promptTokens: 0,
   completionTokens: 0,
+  cachedTokens: 0,
   cost: 0,
   toolCalls: [],
 });
@@ -274,6 +277,7 @@ export const useStore = create<Store>((set) => ({
           promptTokens: e.prompt_tokens ?? workers[e.role].promptTokens,
           completionTokens:
             e.completion_tokens ?? workers[e.role].completionTokens,
+          cachedTokens: e.cached_tokens ?? workers[e.role].cachedTokens,
           cost: e.cost ?? workers[e.role].cost,
         };
         return merge({ workers });

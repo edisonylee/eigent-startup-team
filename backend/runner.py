@@ -21,6 +21,60 @@ from camel.societies.workforce import Workforce
 from camel.tasks import Task
 from camel.toolkits import FunctionTool
 
+
+# --- prompt-caching telemetry --------------------------------------------
+# CAMEL's per-step token tracker only carries prompt/completion/total —
+# `prompt_tokens_details.cached_tokens` is dropped at the accumulator
+# layer (`_update_token_usage_tracker`), so by the time
+# `_build_request_usage_payload` runs the cached count is gone.
+# Patch the tracker pair to additively accumulate `cached_tokens`, and
+# the payload builder to surface it in the request_usage block.
+_orig_create_tracker = ChatAgent._create_token_usage_tracker
+_orig_update_tracker = ChatAgent._update_token_usage_tracker
+_orig_build_usage_payload = ChatAgent._build_request_usage_payload
+
+
+def _patched_create_tracker(self: ChatAgent) -> Dict[str, int]:
+    tracker = _orig_create_tracker(self)
+    tracker["cached_tokens"] = 0
+    return tracker
+
+
+def _patched_update_tracker(
+    self: ChatAgent,
+    tracker: Dict[str, int],
+    usage_dict: Dict[str, Any],
+) -> None:
+    _orig_update_tracker(self, tracker, usage_dict)
+    details = (usage_dict or {}).get("prompt_tokens_details")
+    cached = 0
+    if isinstance(details, dict):
+        cached = int(details.get("cached_tokens") or 0)
+    elif details is not None and hasattr(details, "cached_tokens"):
+        cached = int(getattr(details, "cached_tokens") or 0)
+    tracker["cached_tokens"] = tracker.get("cached_tokens", 0) + cached
+
+
+def _patched_build_usage_payload(
+    self: ChatAgent,
+    usage_dict: Dict[str, Any],
+    step_usage: Dict[str, int],
+    request_index: int,
+    response_id: str,
+) -> Dict[str, Any]:
+    payload = _orig_build_usage_payload(
+        self, usage_dict, step_usage, request_index, response_id
+    )
+    payload["request_usage"]["cached_tokens"] = int(
+        (usage_dict or {}).get("cached_tokens") or 0
+    )
+    return payload
+
+
+ChatAgent._create_token_usage_tracker = _patched_create_tracker
+ChatAgent._update_token_usage_tracker = _patched_update_tracker
+ChatAgent._build_request_usage_payload = _patched_build_usage_payload
+
 from src.agents import (
     ASSESSOR_PROMPT,
     PLAN_PROMPT,
@@ -101,11 +155,19 @@ _CONCLUSION_MARKER = re.compile(r"^##\s+Conclusion\s*$", re.MULTILINE | re.IGNOR
 
 
 def _total_cost(totals: Dict[str, Dict[str, int]], cfg) -> float:
-    """Sum cost across all workers using the active backend's pricing."""
+    """Sum cost across all workers using the active backend's pricing.
+
+    Applies prompt-caching discount: cached input tokens are billed at
+    50% of the input rate (OpenAI's stated cached-prefix pricing).
+    """
     total = 0.0
     for b in totals.values():
+        prompt = b.get("prompt_tokens", 0)
+        cached = min(b.get("cached_tokens", 0), prompt)
+        fresh = prompt - cached
         total += (
-            b.get("prompt_tokens", 0) * cfg.input_cost_per_m / 1_000_000
+            fresh * cfg.input_cost_per_m / 1_000_000
+            + cached * cfg.input_cost_per_m * 0.5 / 1_000_000
             + b.get("completion_tokens", 0) * cfg.output_cost_per_m / 1_000_000
         )
     return total
@@ -442,11 +504,23 @@ def _usage_callback(
     def cb(payload: Dict[str, Any]) -> None:
         u = payload.get("request_usage", {}) or {}
         bucket = totals[role]
-        bucket["prompt_tokens"] += int(u.get("prompt_tokens") or 0)
-        bucket["completion_tokens"] += int(u.get("completion_tokens") or 0)
+        prompt_delta = int(u.get("prompt_tokens") or 0)
+        completion_delta = int(u.get("completion_tokens") or 0)
+        cached_delta = int(u.get("cached_tokens") or 0)
+        # Defensive clamp — cached should never exceed prompt.
+        if cached_delta > prompt_delta:
+            cached_delta = prompt_delta
+
+        bucket["prompt_tokens"] += prompt_delta
+        bucket["completion_tokens"] += completion_delta
+        bucket["cached_tokens"] = bucket.get("cached_tokens", 0) + cached_delta
+
         cfg = get_active_config()
+        # OpenAI prompt caching: cached input tokens billed at 50% off.
+        fresh_in = bucket["prompt_tokens"] - bucket["cached_tokens"]
         cost = (
-            bucket["prompt_tokens"] * cfg.input_cost_per_m / 1_000_000
+            fresh_in * cfg.input_cost_per_m / 1_000_000
+            + bucket["cached_tokens"] * cfg.input_cost_per_m * 0.5 / 1_000_000
             + bucket["completion_tokens"] * cfg.output_cost_per_m / 1_000_000
         )
         emit(
@@ -455,6 +529,7 @@ def _usage_callback(
                 role=role,
                 prompt_tokens=bucket["prompt_tokens"],
                 completion_tokens=bucket["completion_tokens"],
+                cached_tokens=bucket["cached_tokens"],
                 cost=cost,
             )
         )
@@ -600,7 +675,7 @@ async def _run(task_id: str, idea: str, biomarkers: List[dict]) -> None:
     try:
         db.create_run_sync(task_id, idea, cfg.backend.value)
         totals: Dict[str, Dict[str, int]] = defaultdict(
-            lambda: {"prompt_tokens": 0, "completion_tokens": 0}
+            lambda: {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         )
         wf = _build_instrumented_workforce(emit, totals)
 
@@ -702,7 +777,7 @@ async def _run_followup(new_task_id: str, orig_task_id: str, note: str) -> None:
         prev = _finished_runs[orig_task_id]
         db.create_run_sync(new_task_id, f"follow-up of {orig_task_id}: {note}", cfg.backend.value)
         totals: Dict[str, Dict[str, int]] = defaultdict(
-            lambda: {"prompt_tokens": 0, "completion_tokens": 0}
+            lambda: {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         )
 
         safety_agent = ChatAgent(

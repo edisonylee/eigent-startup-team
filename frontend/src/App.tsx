@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import ApprovalModal from "./components/ApprovalModal";
+import AgentQuestionModal from "./components/AgentQuestionModal";
 import BiomarkerTable from "./components/BiomarkerTable";
 import Gate from "./components/Gate";
 import MemoPanel from "./components/MemoPanel";
@@ -46,7 +46,21 @@ export default function App() {
 
   if (!authed) return <Gate />;
 
-  const busy = phase === "running" || phase === "awaiting_approval";
+  const busy = phase === "running";
+
+  const submitAnswer = async (request_id: string, answer: string) => {
+    if (!taskId) return;
+    try {
+      await fetch(`/api/run/${taskId}/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id, answer, password }),
+      });
+    } catch {
+      // Swallow — if the answer POST fails the agent will time out and
+      // proceed with its default ("use your best judgment").
+    }
+  };
 
   const uploadLabs = async (formData: FormData) => {
     formData.set("password", password);
@@ -193,11 +207,7 @@ export default function App() {
             disabled={busy || !idea.trim()}
             className="rounded-md bg-stone-900 px-6 py-2 text-sm text-white hover:bg-stone-700 disabled:opacity-40"
           >
-            {phase === "running"
-              ? "Running…"
-              : phase === "awaiting_approval"
-                ? "Awaiting approval…"
-                : "Run"}
+            {phase === "running" ? "Running…" : "Run"}
           </button>
         </div>
 
@@ -285,7 +295,7 @@ export default function App() {
       </div>
 
       <WorkerDrawer />
-      <ApprovalModal />
+      <AgentQuestionModal onAnswer={submitAnswer} />
     </div>
   );
 }

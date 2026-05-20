@@ -41,3 +41,7 @@ class RunEvent(BaseModel):
     retrieved_sources: Optional[list[dict]] = None
     # tool_call (graph retrieval): top retrieved entities + their 1-hop edges
     retrieved_entities: Optional[list[dict]] = None
+    # human_input_required: agent-initiated mid-run question
+    question: Optional[str] = None
+    choices: Optional[list[str]] = None
+    request_id: Optional[str] = None

@@ -26,7 +26,7 @@ from src.lab_parser import parse_labs
 from .runner import (
     event_stream,
     rate_limited,
-    resolve_approval,
+    resolve_question,
     start_follow_up,
     start_run,
 )
@@ -52,8 +52,9 @@ class RunRequest(BaseModel):
     biomarkers: Optional[list[dict]] = None
 
 
-class ApprovalRequest(BaseModel):
-    approved: bool
+class AnswerRequest(BaseModel):
+    request_id: str
+    answer: str
     password: str
 
 
@@ -75,13 +76,20 @@ async def run(req: RunRequest) -> dict:
     return {"task_id": start_run(req.idea.strip(), req.biomarkers)}
 
 
-@app.post("/api/run/{task_id}/human_input")
-async def human_input(task_id: str, req: ApprovalRequest) -> dict:
+@app.post("/api/run/{task_id}/answer")
+async def answer(task_id: str, req: AnswerRequest) -> dict:
+    """Resolve an agent-initiated `request_human_input` question.
+
+    The `task_id` path arg is currently only used for logging/auth grouping;
+    request_ids are globally unique. Kept in the path for symmetry with the
+    other run endpoints and to leave room for per-task auth in the future.
+    """
     if req.password != APP_PASSWORD:
         raise HTTPException(status_code=401, detail="Wrong password.")
-    if not resolve_approval(task_id, req.approved):
+    if not resolve_question(req.request_id, req.answer):
         raise HTTPException(
-            status_code=404, detail="No pending approval for this task."
+            status_code=404,
+            detail="No pending question with that id (already answered or timed out).",
         )
     return {"ok": True}
 

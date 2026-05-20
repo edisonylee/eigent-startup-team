@@ -10,6 +10,7 @@ the web. All callbacks are thread-safe — they may fire from worker threads.
 import asyncio
 import functools
 import re
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -35,10 +36,12 @@ from .events import RunEvent
 # task_id -> event queue. `None` on the queue is the close sentinel.
 _queues: dict[str, asyncio.Queue] = {}
 
-# task_id -> Future awaiting human approval. Resolved by the /human_input
-# endpoint or cancelled by a 5-min timeout.
-_pending_approvals: dict[str, asyncio.Future] = {}
-_APPROVAL_TIMEOUT_S = 300
+# request_id -> {event, slot, role} for in-flight agent-initiated questions.
+# The agent's tool fn blocks on `event` until /answer endpoint fills `slot`
+# and sets the event. Timeout is the agent's responsibility (it returns
+# a sensible default if no answer arrives in time).
+_pending_questions: dict[str, dict] = {}
+_QUESTION_TIMEOUT_S = 300
 
 
 # task_id -> the inputs + final memo of a completed-and-approved run.
@@ -140,6 +143,54 @@ def _wrap_search_tool(
         return real(*args, **kwargs)
 
     return FunctionTool(search_duckduckgo)
+
+
+def _make_question_tool(
+    role: str,
+    emit: Callable[[RunEvent], None],
+) -> FunctionTool:
+    """Build a `request_human_input` FunctionTool bound to a specific
+    worker role. The tool blocks the worker thread on a threading.Event
+    until the user's POST to /api/run/{id}/answer resolves it.
+    """
+
+    def request_human_input(question: str, choices: str = "") -> str:
+        """Ask the user a clarifying question. Use SPARINGLY — ONLY when
+        the answer would materially change your output. The user can
+        always answer "use your best judgment" and you'll proceed with
+        sensible defaults.
+
+        Args:
+            question: The clarifying question to ask the human.
+            choices: Optional comma-separated list of multiple-choice
+                options. If non-empty, the UI renders them as buttons.
+
+        Returns:
+            The user's answer as a string. Returns "use your best judgment"
+            if the user doesn't respond within the timeout.
+        """
+        rid = uuid.uuid4().hex[:8]
+        ev = threading.Event()
+        slot = {"answer": "use your best judgment"}
+        _pending_questions[rid] = {"event": ev, "slot": slot, "role": role}
+
+        opts: list[str] = [c.strip() for c in (choices or "").split(",") if c.strip()]
+
+        emit(
+            RunEvent(
+                type="human_input_required",
+                role=role,
+                question=question,
+                choices=opts,
+                request_id=rid,
+            )
+        )
+
+        ev.wait(timeout=_QUESTION_TIMEOUT_S)
+        _pending_questions.pop(rid, None)
+        return slot["answer"]
+
+    return FunctionTool(request_human_input)
 
 
 def _wrap_graph_tool(emit: Callable[[RunEvent], None]) -> FunctionTool:
@@ -254,22 +305,30 @@ def _build_instrumented_workforce(
     researcher = ChatAgent(
         system_message=RESEARCHER_PROMPT,
         model=_model(stream=True),
-        tools=[graph_tool, kb_tool, web_tool],
+        tools=[
+            graph_tool,
+            kb_tool,
+            web_tool,
+            _make_question_tool("researcher", emit),
+        ],
         on_request_usage=_usage_callback("researcher", totals, emit),
     )
     assessor = ChatAgent(
         system_message=ASSESSOR_PROMPT,
         model=_model(stream=True),
+        tools=[_make_question_tool("analyst", emit)],
         on_request_usage=_usage_callback("analyst", totals, emit),
     )
     reviewer = ChatAgent(
         system_message=SAFETY_PROMPT,
         model=_model(stream=True),
+        tools=[_make_question_tool("critic", emit)],
         on_request_usage=_usage_callback("critic", totals, emit),
     )
     writer = ChatAgent(
         system_message=PLAN_PROMPT,
         model=_model(stream=True),
+        tools=[_make_question_tool("summarizer", emit)],
         on_request_usage=_usage_callback("summarizer", totals, emit),
     )
 
@@ -307,12 +366,15 @@ def start_run(idea: str, biomarkers: Optional[List[dict]] = None) -> str:
     return task_id
 
 
-def resolve_approval(task_id: str, approved: bool) -> bool:
-    """Resolve a pending approval future. Returns False if no pending run."""
-    fut = _pending_approvals.get(task_id)
-    if fut is None or fut.done():
+def resolve_question(request_id: str, answer: str) -> bool:
+    """Fill the slot of a pending agent-initiated question. Returns False
+    if the request_id is unknown (already answered, timed out, or never
+    existed)."""
+    pending = _pending_questions.get(request_id)
+    if pending is None or pending["event"].is_set():
         return False
-    fut.set_result(approved)
+    pending["slot"]["answer"] = answer
+    pending["event"].set()
     return True
 
 
@@ -383,32 +445,12 @@ async def _run(task_id: str, idea: str, biomarkers: List[dict]) -> None:
         result = await wf.process_task_async(task)
         memo = _extract_memo(result.result)
 
-        # HITL gate — pause for explicit user approval before completing.
-        approval_future: asyncio.Future = loop.create_future()
-        _pending_approvals[task_id] = approval_future
-        emit(RunEvent(type="human_input_required", memo=memo))
-
-        try:
-            approved = await asyncio.wait_for(
-                approval_future, timeout=_APPROVAL_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            emit(
-                RunEvent(
-                    type="error",
-                    text="Approval timed out after 5 minutes — run cancelled.",
-                )
-            )
-        else:
-            if approved:
-                emit(RunEvent(type="task_complete", memo=memo))
-                _finished_runs[task_id] = FinishedRun(
-                    profile=idea, biomarkers=biomarkers, memo=memo
-                )
-            else:
-                emit(RunEvent(type="error", text="Run rejected by user."))
-        finally:
-            _pending_approvals.pop(task_id, None)
+        # HITL is now agent-initiated mid-run via request_human_input.
+        # The plan is released as soon as the Workforce finishes.
+        emit(RunEvent(type="task_complete", memo=memo))
+        _finished_runs[task_id] = FinishedRun(
+            profile=idea, biomarkers=biomarkers, memo=memo
+        )
 
     except Exception as exc:  # surface failures to the UI instead of hanging
         emit(RunEvent(type="error", text=f"{type(exc).__name__}: {exc}"))
@@ -447,11 +489,13 @@ async def _run_followup(new_task_id: str, orig_task_id: str, note: str) -> None:
         safety_agent = ChatAgent(
             system_message=SAFETY_PROMPT,
             model=_model(stream=False),
+            tools=[_make_question_tool("critic", emit)],
             on_request_usage=_usage_callback("critic", totals, emit),
         )
         plan_agent = ChatAgent(
             system_message=PLAN_PROMPT,
             model=_model(stream=False),
+            tools=[_make_question_tool("summarizer", emit)],
             on_request_usage=_usage_callback("summarizer", totals, emit),
         )
 
@@ -510,35 +554,15 @@ async def _run_followup(new_task_id: str, orig_task_id: str, note: str) -> None:
 
         new_memo = _strip_reasoning_prelude(plan_text)
 
-        # HITL gate fires on the follow-up too.
-        approval_future: asyncio.Future = loop.create_future()
-        _pending_approvals[new_task_id] = approval_future
-        emit(RunEvent(type="human_input_required", memo=new_memo))
-
-        try:
-            approved = await asyncio.wait_for(
-                approval_future, timeout=_APPROVAL_TIMEOUT_S
-            )
-        except asyncio.TimeoutError:
-            emit(
-                RunEvent(
-                    type="error",
-                    text="Approval timed out — follow-up cancelled.",
-                )
-            )
-        else:
-            if approved:
-                emit(RunEvent(type="task_complete", memo=new_memo))
-                # Store under the NEW task_id so chained follow-ups work.
-                _finished_runs[new_task_id] = FinishedRun(
-                    profile=prev.profile,
-                    biomarkers=prev.biomarkers,
-                    memo=new_memo,
-                )
-            else:
-                emit(RunEvent(type="error", text="Follow-up rejected by user."))
-        finally:
-            _pending_approvals.pop(new_task_id, None)
+        # No end-gate — HITL is agent-initiated during Safety/Plan steps
+        # (the question tool fires inline when needed). Release on
+        # natural completion.
+        emit(RunEvent(type="task_complete", memo=new_memo))
+        _finished_runs[new_task_id] = FinishedRun(
+            profile=prev.profile,
+            biomarkers=prev.biomarkers,
+            memo=new_memo,
+        )
 
     except Exception as exc:
         emit(RunEvent(type="error", text=f"{type(exc).__name__}: {exc}"))

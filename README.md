@@ -160,6 +160,35 @@ Every graph hit emits a `tool_call` SSE event with `retrieved_entities`,
 the node card shows a `🕸️ N graph` badge, and the drawer renders each
 retrieved entity with its 1-hop edges and similarity score.
 
+## Human-in-the-loop (mid-run, agent-initiated)
+
+Every Workforce agent has a `request_human_input(question, choices)`
+tool. When an agent encounters genuine ambiguity in the profile that
+would change its output — *"on some pills" → which medication? "back
+pain" → chronic or recent? want to eat healthier" → omnivore or
+vegan?* — it calls the tool. The runner emits a
+`human_input_required` SSE event, the UI surfaces a modal with the
+agent's question (and optional choices as buttons), and the agent's
+tool call blocks on a `threading.Event` until the user submits.
+
+`POST /api/run/{task_id}/answer` body `{request_id, answer, password}`
+resolves the question. The user can always answer "Use your best
+judgment" — that string is sent back as the tool's return value and
+the agent proceeds with sensible defaults. There is no "reject the
+run" path: completed work is never thrown away.
+
+Each agent's prompt has specific triggers for when to ask:
+
+- **Researcher** — only when the profile is materially ambiguous in a
+  way that changes the research direction.
+- **Assessor** — only when there are >4 strong candidate focus areas
+  and the user needs to prioritize.
+- **Safety Reviewer** — when the profile mentions medications,
+  procedures, conditions, or pregnancy/postpartum status without
+  specifics; one concise question.
+- **Plan Writer** — only for a major preference choice (e.g. time
+  budget) that materially changes the plan.
+
 ## Follow-up refinement
 
 After a plan is approved, the UI surfaces a **Follow-up** input below

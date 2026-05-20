@@ -351,55 +351,80 @@ markers as consult items; the Plan Writer cites them by name."*
 
 ---
 
-## 7. Human-in-the-loop approval gate
+## 7. Human-in-the-loop (mid-run, agent-initiated)
 
-The HITL gate sits **after** the Workforce finishes but **before** the
-plan is released to the user. The run pauses; the user reviews a
-preview; only on Approve does the full plan render.
+HITL here is **agent-initiated**, not a publication gate. Every agent
+in the Workforce has a `request_human_input(question, choices)` tool.
+When an agent encounters a real information gap — *"on some pills" →
+which medication? "back pain" → chronic or recent? want to eat
+healthier" → omnivore or vegan?* — it **calls the tool**, the runner
+pauses that worker's thread on a `threading.Event` and emits a
+`human_input_required` SSE event, the UI shows a modal, the user
+submits an answer (or "use your best judgment"), the event is set, the
+tool returns the answer string, and the agent continues.
+
+This replaces an earlier publication-gate design that was wrong: it
+gated *output* rather than helping agents *during* their work, and its
+"reject" path discarded completed work. The mid-run pattern matches
+how Eigent's product actually surfaces HITL — agents request help when
+they need it, not the user gating publication.
 
 ### Backend — `backend/runner.py`
 
 ```python
-# Pseudocode of the gate
-result = await wf.process_task_async(task)
-memo = _extract_memo(result.result)              # also strips reasoning prelude
+# Per-request_id slot the user's POST fills.
+_pending_questions: dict[str, dict] = {}
 
-approval_future = loop.create_future()
-_pending_approvals[task_id] = approval_future
-emit(RunEvent(type="human_input_required", memo=memo))   # ← UI shows modal
-
-try:
-    approved = await asyncio.wait_for(approval_future, timeout=300)
-except asyncio.TimeoutError:
-    emit(RunEvent(type="error", text="Approval timed out..."))
-else:
-    if approved:
-        emit(RunEvent(type="task_complete", memo=memo))
-        _finished_runs[task_id] = FinishedRun(profile, biomarkers, memo)
-    else:
-        emit(RunEvent(type="error", text="Run rejected by user."))
-finally:
-    _pending_approvals.pop(task_id, None)
+def _make_question_tool(role, emit):
+    def request_human_input(question: str, choices: str = "") -> str:
+        rid = uuid.uuid4().hex[:8]
+        ev = threading.Event()
+        slot = {"answer": "use your best judgment"}        # default
+        _pending_questions[rid] = {"event": ev, "slot": slot, "role": role}
+        emit(RunEvent(type="human_input_required",
+                      role=role, question=question,
+                      choices=[c.strip() for c in choices.split(",") if c.strip()],
+                      request_id=rid))
+        ev.wait(timeout=300)                                # block worker thread
+        _pending_questions.pop(rid, None)
+        return slot["answer"]
+    return FunctionTool(request_human_input)
 ```
 
-- **Endpoint that resolves the gate:** `POST /api/run/{task_id}/human_input`
-  → calls `resolve_approval(task_id, approved)` → `Future.set_result(...)`.
-- **Timeout (5 min):** prevents zombie tasks if the user disappears.
+`POST /api/run/{task_id}/answer` body `{request_id, answer, password}`
+calls `resolve_question(request_id, answer)` which fills the slot and
+sets the event. Worker thread wakes up, tool returns the string, agent
+continues.
 
-### Frontend — `frontend/src/components/ApprovalModal.tsx`
+### Per-agent triggers (in their prompts)
 
-The modal parses the memo's `# ` H1 sections (Your Profile, Safety
-Notes, Focus Areas, If you only do one thing this week) and shows a
-preview. The full memo only renders **after** approve. The total cost
-ticker stays visible — the user knows what they spent before approving.
+- **Researcher** — only when the profile is materially ambiguous in a
+  way that changes the research direction.
+- **Assessor** — only when >4 strong candidate focus areas and the
+  user needs to prioritize.
+- **Safety Reviewer** — when the profile mentions medications,
+  procedures, conditions, or pregnancy/postpartum status without
+  specifics; one concise question.
+- **Plan Writer** — only for a major preference choice (e.g. time
+  budget) that materially changes the plan.
+
+### Frontend — `frontend/src/components/AgentQuestionModal.tsx`
+
+Renders the head of the question queue. Shows the agent's name, the
+question, choices as buttons (if provided) or a free-text textarea,
+and an always-present *"Use your best judgment"* escape. Multiple
+parallel questions queue; answering surfaces the next.
 
 ### Why this maps to Eigent
 
-Eigent's marketing leads with HITL: their desktop app gates high-stakes
-agent actions (code exec, file writes, tool installs) behind explicit
-user consent. This pattern — *pause on an asyncio.Future, expose a
-typed event, resolve from a POST* — is the production-grade version of
-what you'd see in a real Eigent feature.
+Eigent's product surfaces HITL the same way: when an agent is about
+to take a high-stakes action (code execution, tool install) it asks
+the user inline. The collaboration pattern is "ask for help mid-task,"
+not "approve a finished bundle." The talk-track: *"I deliberately
+redesigned from a publication gate to agent-initiated mid-run input
+requests — the agents call a tool, block on a threading.Event, and
+the user's answer flows back as the tool return value. Never discards
+completed work."*
 
 ---
 

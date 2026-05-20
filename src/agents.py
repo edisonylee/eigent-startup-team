@@ -67,6 +67,14 @@ You have THREE retrieval tools and pick per question:
     specific things the curated sources won't have: product names,
     brand-specific info, very recent studies, niche conditions.
 
+You also have a `request_human_input(question, choices)` tool. CALL it
+when the profile leaves out a fact you genuinely need — e.g. the profile
+says "some back pain" with no duration, or "want to eat healthier"
+without indicating omnivore vs vegan, or "started exercising" without
+saying how often. One concise question. If the profile is already
+specific enough, don't ask. The user can always reply "use your best
+judgment" so they're never blocked.
+
 For every recommendation, cite the source URL or entity name. If no tool
 returns useful results, say so rather than speculating. You do not
 diagnose. This is educational information, not medical advice."""
@@ -93,6 +101,13 @@ For EACH focus area, output:
   - **Target** — measurable change over the next 4–6 weeks, with numbers
     ("8,000 steps/day, two 25-min strength sessions/week")
   - **First concrete step** — one specific thing they can do today
+
+You have a `request_human_input(question, choices)` tool. Use it ONLY
+when you have MORE than 4 strong candidate focus areas and genuinely
+need the user to prioritize — pass the candidate areas as `choices`.
+Otherwise pick the top 3–4 yourself; the user can always refine later.
+Do NOT use it to ask about preferences or context that's already in the
+profile.
 
 Be specific. No generic categories like "eat better" or "exercise more"
 without numbers. Do not diagnose conditions. This is educational, not
@@ -124,6 +139,16 @@ If lab values are provided in the profile:
     iron supplementation when ferritin is already high), flag it as a risk.
   - Multiple out-of-range biomarkers should push the verdict toward
     'follow-with-caution' or 'consult-first'.
+
+You have a `request_human_input(question, choices)` tool. CALL it
+**before** you finalize your verdict whenever the profile mentions
+something safety-relevant without specifics — e.g. "on some pills"
+(ask which), "back pain" (ask chronic vs recent), "recently had
+surgery" (ask what kind / when), pregnancy / postpartum status.
+One concise question that would change your risks or verdict. The
+user can reply "use your best judgment" if they don't know; in that
+case proceed by treating the concern as a consult-with-clinician
+item. If the profile is already specific, do NOT ask.
 
 You do not diagnose."""
 
@@ -196,6 +221,12 @@ Conclusion sections, in this exact order:
 
   # If you only do one thing this week
   A single bold line — the single highest-leverage action for this person.
+
+You have a `request_human_input(question, choices)` tool. Use it ONLY
+for a major preference choice that materially changes the plan — e.g.
+*"How much time can you give exercise each week?"* with `choices` like
+"<30 min, 30-90 min, 90-180 min, 180+ min". Do NOT use it for tone,
+style, or anything you can infer from the profile. Use sparingly.
 
 End with this exact line on its own:
 *This plan is educational information, not medical advice. Consult a qualified

@@ -17,7 +17,7 @@ export const ROLE_LABEL: Record<Role, string> = {
 };
 
 export type Status = "pending" | "running" | "done";
-export type Phase = "idle" | "running" | "awaiting_approval" | "done" | "error";
+export type Phase = "idle" | "running" | "done" | "error";
 
 /** One server-sent event from a run. Mirrors backend/events.py RunEvent. */
 export interface RunEvent {
@@ -47,6 +47,17 @@ export interface RunEvent {
     score: number;
     edge_count: number;
   }[];
+  // human_input_required (agent-initiated):
+  question?: string;
+  choices?: string[];
+  request_id?: string;
+}
+
+export interface AgentQuestion {
+  request_id: string;
+  role: Role;
+  question: string;
+  choices: string[];
 }
 
 export interface ToolCall {
@@ -92,11 +103,12 @@ interface Store {
   authed: boolean;
   workers: Record<Role, WorkerState>;
   memo: string;
-  pendingMemo: string;
   error: string;
   taskId: string;
   expandedRole: Role | null;
   prompts: Record<Role, string> | null;
+  // Agent-initiated questions (mid-run HITL). Queue + current head.
+  questionQueue: AgentQuestion[];
   // Labs
   labPanel: BiomarkerPanel | null;
   labError: string;
@@ -111,6 +123,7 @@ interface Store {
   setLabPanel: (p: BiomarkerPanel | null) => void;
   setLabError: (m: string) => void;
   setLabLoading: (v: boolean) => void;
+  dismissQuestion: (request_id: string) => void;
   startRun: () => void;
   startFollowUp: () => void;
   applyEvent: (e: RunEvent) => void;
@@ -138,11 +151,11 @@ export const useStore = create<Store>((set) => ({
   authed: false,
   workers: freshWorkers(),
   memo: "",
-  pendingMemo: "",
   error: "",
   taskId: "",
   expandedRole: null,
   prompts: null,
+  questionQueue: [],
   labPanel: null,
   labError: "",
   labLoading: false,
@@ -156,14 +169,18 @@ export const useStore = create<Store>((set) => ({
   setLabPanel: (p) => set({ labPanel: p, labError: "" }),
   setLabError: (m) => set({ labError: m }),
   setLabLoading: (v) => set({ labLoading: v }),
+  dismissQuestion: (request_id) =>
+    set((s) => ({
+      questionQueue: s.questionQueue.filter((q) => q.request_id !== request_id),
+    })),
 
   startRun: () =>
     set({
       phase: "running",
       workers: freshWorkers(),
       memo: "",
-      pendingMemo: "",
       error: "",
+      questionQueue: [],
     }),
 
   startFollowUp: () =>
@@ -182,8 +199,8 @@ export const useStore = create<Store>((set) => ({
         phase: "running",
         workers,
         memo: "",
-        pendingMemo: "",
         error: "",
+        questionQueue: [],
       };
     }),
 
@@ -244,16 +261,20 @@ export const useStore = create<Store>((set) => ({
         return { workers };
       }
 
-      if (e.type === "human_input_required") {
-        // All workers are done at this point; the run is paused for approval.
-        const workers = { ...s.workers };
-        for (const r of ROLE_ORDER) {
-          workers[r] = { ...workers[r], status: "done" };
-        }
+      if (e.type === "human_input_required" && e.request_id && e.role) {
+        // Agent-initiated mid-run question. Enqueue; modal shows the head.
+        // Workers keep their current state — they're paused waiting on
+        // the user's answer, not done.
         return {
-          phase: "awaiting_approval",
-          pendingMemo: e.memo || "",
-          workers,
+          questionQueue: [
+            ...s.questionQueue,
+            {
+              request_id: e.request_id,
+              role: e.role,
+              question: e.question || "",
+              choices: e.choices || [],
+            },
+          ],
         };
       }
 
@@ -264,9 +285,9 @@ export const useStore = create<Store>((set) => ({
         }
         return {
           phase: "done",
-          memo: e.memo || s.pendingMemo || "",
-          pendingMemo: "",
+          memo: e.memo || "",
           workers,
+          questionQueue: [],
         };
       }
 
@@ -274,7 +295,7 @@ export const useStore = create<Store>((set) => ({
         return {
           phase: "error",
           error: e.text || "Run failed.",
-          pendingMemo: "",
+          questionQueue: [],
         };
       }
 

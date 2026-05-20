@@ -9,6 +9,10 @@ Run:  uv run python -m scripts.ingest_kb [--limit N] [--force]
 Requires:
   - FIRECRAWL_API_KEY in .env  — free tier from firecrawl.dev
   - Optional: HEALTHOS_VECTOR_DIR  — override storage path (default ~/.healthos/vector/)
+
+Once you're happy with retrieval quality, snapshot the result into the
+repo with `uv run python -m scripts.build_kb_bundle` so first-launch
+installs are usable without re-running Firecrawl.
 """
 
 from __future__ import annotations

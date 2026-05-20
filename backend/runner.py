@@ -293,6 +293,88 @@ def _mcp_kb_tool(emit: Callable[[RunEvent], None]) -> FunctionTool:
     return FunctionTool(search_health_kb)
 
 
+def _notes_dir_abs() -> str:
+    """Same path the filesystem MCP server is rooted at."""
+    import pathlib
+
+    return str(
+        (pathlib.Path.home() / ".healthos" / "notes").expanduser().resolve()
+    )
+
+
+def _mcp_list_notes_tool(emit: Callable[[RunEvent], None]) -> FunctionTool:
+    """List files in ~/.healthos/notes/ via the filesystem MCP server."""
+
+    def list_notes() -> list[str]:
+        """list_notes — return filenames the user has dropped into the notes
+        folder. Pair with `read_notes(filename)` to read one.
+
+        Returns:
+            A list of filenames (no paths). Empty list if the folder is empty.
+        """
+        result = get_manager().call_sync(
+            "filesystem", "list_directory", {"path": _notes_dir_abs()}
+        )
+        emit(
+            RunEvent(
+                type="tool_call",
+                role="researcher",
+                tool_name="list_notes",
+                tool_query="",
+            )
+        )
+        out: list[str] = []
+        for c in getattr(result, "content", None) or []:
+            text = getattr(c, "text", None) or ""
+            for line in text.splitlines():
+                # filesystem MCP returns "[DIR] name" / "[FILE] name" rows.
+                stripped = line.strip()
+                if stripped.startswith("[FILE] "):
+                    out.append(stripped[len("[FILE] ") :])
+        return out
+
+    return FunctionTool(list_notes)
+
+
+def _mcp_read_notes_tool(emit: Callable[[RunEvent], None]) -> FunctionTool:
+    """Read one file from ~/.healthos/notes/ via the filesystem MCP server."""
+
+    import os
+
+    def read_notes(filename: str) -> str:
+        """read_notes — read the contents of a user-supplied note file.
+
+        Args:
+            filename: A filename inside the notes folder (no slashes). Get
+                candidates from `list_notes()` first if you don't know the name.
+
+        Returns:
+            The file contents as a string, or an error string if not found.
+        """
+        if "/" in filename or filename.startswith(".."):
+            return f"refused: invalid filename '{filename}'"
+        path = os.path.join(_notes_dir_abs(), filename)
+        result = get_manager().call_sync(
+            "filesystem", "read_text_file", {"path": path}
+        )
+        emit(
+            RunEvent(
+                type="tool_call",
+                role="researcher",
+                tool_name="read_notes",
+                tool_query=filename,
+            )
+        )
+        text_parts: list[str] = []
+        for c in getattr(result, "content", None) or []:
+            t = getattr(c, "text", None)
+            if t:
+                text_parts.append(t)
+        return "\n".join(text_parts) or f"empty: {filename}"
+
+    return FunctionTool(read_notes)
+
+
 def _mcp_brave_tool(emit: Callable[[RunEvent], None]) -> FunctionTool:
     """Route web search through the Brave MCP server (when enabled)."""
 
@@ -371,6 +453,9 @@ def _build_instrumented_workforce(
         _mcp_graph_tool(emit),
         _mcp_kb_tool(emit),
     ]
+    if manager.is_connected("filesystem"):
+        researcher_tools.append(_mcp_list_notes_tool(emit))
+        researcher_tools.append(_mcp_read_notes_tool(emit))
     if manager.is_connected("brave_search"):
         researcher_tools.append(_mcp_brave_tool(emit))
     researcher_tools.append(_make_question_tool("researcher", emit))

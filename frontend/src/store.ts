@@ -96,6 +96,19 @@ interface WorkerState {
   toolCalls: ToolCall[];
 }
 
+/**
+ * A synthesized timeline row built from a live SSE event. Mirrors the DB
+ * `run_event` shape so the same renderer can display both. Uses negative
+ * ids to avoid colliding with the autoincrementing DB ids.
+ */
+export interface TimelineRow {
+  id: number;
+  ts: number;
+  kind: string;
+  role: string | null;
+  payload: Record<string, any>;
+}
+
 interface Store {
   phase: Phase;
   idea: string;
@@ -109,6 +122,8 @@ interface Store {
   prompts: Record<Role, string> | null;
   // Agent-initiated questions (mid-run HITL). Queue + current head.
   questionQueue: AgentQuestion[];
+  // Live event log for the in-page timeline view. Rebuilt each run.
+  eventLog: TimelineRow[];
   // Labs
   labPanel: BiomarkerPanel | null;
   labError: string;
@@ -156,6 +171,7 @@ export const useStore = create<Store>((set) => ({
   expandedRole: null,
   prompts: null,
   questionQueue: [],
+  eventLog: [],
   labPanel: null,
   labError: "",
   labLoading: false,
@@ -181,6 +197,7 @@ export const useStore = create<Store>((set) => ({
       memo: "",
       error: "",
       questionQueue: [],
+      eventLog: [],
     }),
 
   startFollowUp: () =>
@@ -201,12 +218,31 @@ export const useStore = create<Store>((set) => ({
         memo: "",
         error: "",
         questionQueue: [],
+        eventLog: [],
       };
     }),
 
   applyEvent: (e) =>
     set((s) => {
-      if (e.type === "task_started") return { phase: "running" };
+      // Append every event (except worker_chunk, too noisy) to the live
+      // timeline log. Negative id keeps it from colliding with DB rows.
+      const patch: Partial<Store> = {};
+      if (e.type !== "worker_chunk") {
+        patch.eventLog = [
+          ...s.eventLog,
+          {
+            id: -1 - s.eventLog.length,
+            ts: Date.now() / 1000,
+            kind: e.type,
+            role: e.role ?? null,
+            payload: e as unknown as Record<string, any>,
+          },
+        ];
+      }
+
+      const merge = (extra: Partial<Store>): Partial<Store> => ({ ...patch, ...extra });
+
+      if (e.type === "task_started") return merge({ phase: "running" });
 
       if (e.type === "worker_running" && e.role) {
         const workers = { ...s.workers };
@@ -217,7 +253,7 @@ export const useStore = create<Store>((set) => ({
           }
         }
         workers[e.role] = { ...workers[e.role], status: "running" };
-        return { workers };
+        return merge({ workers });
       }
 
       if (e.type === "worker_chunk" && e.role) {
@@ -228,7 +264,7 @@ export const useStore = create<Store>((set) => ({
             ? e.text || ""
             : prev.text + (e.text || "");
         workers[e.role] = { ...prev, status: "running", text };
-        return { workers };
+        return merge({ workers });
       }
 
       if (e.type === "worker_usage" && e.role) {
@@ -240,7 +276,7 @@ export const useStore = create<Store>((set) => ({
             e.completion_tokens ?? workers[e.role].completionTokens,
           cost: e.cost ?? workers[e.role].cost,
         };
-        return { workers };
+        return merge({ workers });
       }
 
       if (e.type === "tool_call" && e.role) {
@@ -258,14 +294,14 @@ export const useStore = create<Store>((set) => ({
             },
           ],
         };
-        return { workers };
+        return merge({ workers });
       }
 
       if (e.type === "human_input_required" && e.request_id && e.role) {
         // Agent-initiated mid-run question. Enqueue; modal shows the head.
         // Workers keep their current state — they're paused waiting on
         // the user's answer, not done.
-        return {
+        return merge({
           questionQueue: [
             ...s.questionQueue,
             {
@@ -275,7 +311,7 @@ export const useStore = create<Store>((set) => ({
               choices: e.choices || [],
             },
           ],
-        };
+        });
       }
 
       if (e.type === "task_complete") {
@@ -283,23 +319,25 @@ export const useStore = create<Store>((set) => ({
         for (const r of ROLE_ORDER) {
           workers[r] = { ...workers[r], status: "done" };
         }
-        return {
+        return merge({
           phase: "done",
           memo: e.memo || "",
           workers,
+          // Keep questionQueue at task end so the modal doesn't blink open
+          // for a queued question that the run has already moved past.
           questionQueue: [],
-        };
+        });
       }
 
       if (e.type === "error") {
-        return {
+        return merge({
           phase: "error",
           error: e.text || "Run failed.",
           questionQueue: [],
-        };
+        });
       }
 
-      return {};
+      return patch;
     }),
 }));
 

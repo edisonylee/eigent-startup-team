@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import AgentQuestionModal from "./components/AgentQuestionModal";
+import AgentTimeline from "./components/AgentTimeline";
 import BiomarkerTable from "./components/BiomarkerTable";
 import MemoPanel from "./components/MemoPanel";
 import TaskGraph from "./components/TaskGraph";
@@ -22,6 +23,7 @@ export default function App() {
   const setPrompts = useStore((s) => s.setPrompts);
   const setTaskId = useStore((s) => s.setTaskId);
   const taskId = useStore((s) => s.taskId);
+  const eventLog = useStore((s) => s.eventLog);
   const startFollowUp = useStore((s) => s.startFollowUp);
   const setLabPanel = useStore((s) => s.setLabPanel);
   const setLabError = useStore((s) => s.setLabError);
@@ -42,6 +44,27 @@ export default function App() {
       .then((p) => p && setPrompts(p))
       .catch(() => {});
   }, [prompts, setPrompts]);
+
+  // Attach the SSE stream when this route mounts mid-run — happens when
+  // another route (e.g. /check-in weekly synthesis) primed taskId+phase
+  // before navigating back here. Without this, the run streams server-side
+  // but the home page never picks it up.
+  useEffect(() => {
+    if (phase !== "running" || !taskId || esRef.current) return;
+    esRef.current = streamRun(taskId, (ev) => {
+      applyEvent(ev);
+      if (ev.type === "task_complete" || ev.type === "error") {
+        esRef.current?.close();
+        esRef.current = null;
+      }
+    });
+    return () => {
+      esRef.current?.close();
+      esRef.current = null;
+    };
+    // Only run on mount + when taskId/phase first becomes runnable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, phase]);
 
   const busy = phase === "running";
 
@@ -280,6 +303,18 @@ export default function App() {
         )}
 
         <TaskGraph />
+
+        {phase === "running" && eventLog.length > 0 && (
+          <details className="mt-6" open>
+            <summary className="cursor-pointer text-[11px] uppercase tracking-wider text-stone-500 hover:text-stone-800">
+              live timeline · {eventLog.length} event
+              {eventLog.length === 1 ? "" : "s"}
+            </summary>
+            <div className="mt-2">
+              <AgentTimeline events={eventLog} />
+            </div>
+          </details>
+        )}
 
         <div className="mt-6">
           <MemoPanel onFollowUp={runFollowUp} />

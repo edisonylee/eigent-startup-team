@@ -2,10 +2,27 @@ import { useMCPServers, useModelStatus, usePrompts } from "../lib/queries";
 import { ROLE_LABEL, ROLE_ORDER, Role } from "../store";
 
 const ROLE_TOOLS: Record<Role, string[]> = {
-  researcher: ["query_health_graph", "search_health_kb", "search_brave"],
+  researcher: [
+    "query_health_graph",
+    "search_health_kb",
+    "list_notes",
+    "read_notes",
+    "search_brave",
+  ],
   analyst: [],
   critic: [],
   summarizer: [],
+};
+
+// Each agent-facing tool name routes through a specific MCP server.
+// Used to compute connected/disabled state without exposing raw MCP
+// tool names in the roster UI.
+const TOOL_TO_SERVER: Record<string, string> = {
+  query_health_graph: "health_kb",
+  search_health_kb: "health_kb",
+  list_notes: "filesystem",
+  read_notes: "filesystem",
+  search_brave: "brave_search",
 };
 
 const ROLE_BLURB: Record<Role, string> = {
@@ -21,11 +38,13 @@ export default function Agents() {
   const { data: status } = useModelStatus();
   const { data: servers } = useMCPServers();
 
-  const connectedTools = new Set(
-    (servers || [])
-      .filter((s) => s.status === "connected")
-      .flatMap((s) => s.tools.map((t) => t.name)),
+  const connectedServers = new Set(
+    (servers || []).filter((s) => s.status === "connected").map((s) => s.name),
   );
+  const isToolLive = (tool: string) => {
+    const server = TOOL_TO_SERVER[tool];
+    return server ? connectedServers.has(server) : false;
+  };
 
   return (
     <div className="px-6 py-8">
@@ -58,7 +77,7 @@ export default function Agents() {
                 </div>
                 <div className="mt-1 flex flex-wrap gap-1">
                   {ROLE_TOOLS[role].map((t) => {
-                    const live = connectedTools.has(t);
+                    const live = isToolLive(t);
                     return (
                       <span
                         key={t}
@@ -68,7 +87,11 @@ export default function Agents() {
                             ? "bg-green-100 text-green-800"
                             : "bg-stone-100 text-stone-500")
                         }
-                        title={live ? "via MCP" : "MCP server not connected"}
+                        title={
+                          live
+                            ? `via MCP (${TOOL_TO_SERVER[t]})`
+                            : "MCP server not connected"
+                        }
                       >
                         {t}
                       </span>

@@ -6,12 +6,14 @@ import csv
 import io
 import os
 import pathlib
+import shutil
 from contextlib import asynccontextmanager
 from typing import Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pypdf import PdfReader
@@ -365,6 +367,61 @@ def evals_dashboard() -> dict:
     else:
         means = {c: 0.0 for c in criteria}
     return {"rows": rows, "means": means}
+
+
+# --- data export / wipe -------------------------------------------------------
+
+
+class WipeRequest(BaseModel):
+    password: str
+    confirm: str  # must equal "WIPE" to proceed
+
+
+@app.get("/api/data/export")
+def data_export(password: str) -> FileResponse:
+    """Download the SQLite DB. Vector dir + notes are excluded — they're
+    derivable (re-ingestable) and large.
+    """
+    if password != APP_PASSWORD:
+        raise HTTPException(status_code=401, detail="Wrong password.")
+    path = db.db_path()
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No DB to export yet.")
+    return FileResponse(
+        path=str(path),
+        media_type="application/octet-stream",
+        filename="healthos.db",
+    )
+
+
+@app.post("/api/data/wipe")
+def data_wipe(req: WipeRequest) -> dict:
+    """Delete all local data. Requires confirm='WIPE'. Restart server to
+    reinitialize the schema (the lifespan also does this on next boot).
+    """
+    if req.password != APP_PASSWORD:
+        raise HTTPException(status_code=401, detail="Wrong password.")
+    if req.confirm != "WIPE":
+        raise HTTPException(
+            status_code=400,
+            detail="Set `confirm` to 'WIPE' to proceed — this is destructive.",
+        )
+
+    data_dir = db.db_path().parent
+    deleted: list[str] = []
+    for child in data_dir.iterdir():
+        try:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+            deleted.append(child.name)
+        except Exception:
+            continue
+
+    # Recreate the empty schema so the next request doesn't 500.
+    db.init_schema_sync()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/check_ins")

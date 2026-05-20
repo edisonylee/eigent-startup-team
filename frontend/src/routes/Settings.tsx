@@ -219,18 +219,125 @@ function MCPTab() {
 }
 
 function DataTab() {
+  const password = useStore((s) => s.password);
+  const [wipeText, setWipeText] = useState("");
+  const [wipeBusy, setWipeBusy] = useState(false);
+  const [message, setMessage] = useState<{ kind: "ok" | "err"; text: string } | null>(
+    null,
+  );
+
+  const exportDb = () => {
+    // Plain anchor click — the GET endpoint streams the file as octet-stream.
+    const url = `/api/data/export?password=${encodeURIComponent(password)}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "healthos.db";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  const wipe = async () => {
+    setMessage(null);
+    setWipeBusy(true);
+    try {
+      const r = await fetch("/api/data/wipe", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, confirm: wipeText }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+      setMessage({
+        kind: "ok",
+        text: `Wiped: ${(body.deleted as string[]).join(", ") || "(empty)"}`,
+      });
+      setWipeText("");
+    } catch (e) {
+      setMessage({ kind: "err", text: String(e) });
+    } finally {
+      setWipeBusy(false);
+    }
+  };
+
+  const openDataDir = () => {
+    const w = window as unknown as { healthos?: { openDataDir?: () => void } };
+    if (w.healthos?.openDataDir) {
+      w.healthos.openDataDir();
+    } else {
+      setMessage({
+        kind: "err",
+        text: "Open in Finder is only available in the Electron build. Path: ~/.healthos/",
+      });
+    }
+  };
+
   return (
-    <div className="space-y-3 rounded-md border border-stone-200 bg-white p-4 text-sm text-stone-600">
-      <p>
-        Local data lives at{" "}
-        <code className="rounded bg-stone-100 px-1 py-0.5">~/.healthos/</code> —
-        SQLite DB, embedded Chroma vector store, and the notes directory the
-        filesystem MCP server reads from.
-      </p>
-      <p className="text-stone-500">
-        Export and wipe actions will land in the Electron build (Phase C);
-        for now, manage the files directly.
-      </p>
+    <div className="space-y-4">
+      <div className="rounded-md border border-stone-200 bg-white p-4 text-sm text-stone-600">
+        <p>
+          Local data lives at{" "}
+          <code className="rounded bg-stone-100 px-1 py-0.5">~/.healthos/</code> —
+          SQLite DB, embedded Chroma vector store, and the notes directory the
+          filesystem MCP server reads from.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button
+          type="button"
+          onClick={exportDb}
+          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-50"
+        >
+          Export DB
+        </button>
+        <button
+          type="button"
+          onClick={openDataDir}
+          className="rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm text-stone-700 hover:bg-stone-50"
+        >
+          Open data folder
+        </button>
+      </div>
+
+      <div className="rounded-md border border-red-200 bg-red-50/40 p-4">
+        <div className="text-xs font-semibold uppercase tracking-wider text-red-700">
+          Danger zone
+        </div>
+        <p className="mt-1 text-sm text-stone-700">
+          Wipe all local data — DB, vector store, notes. Type{" "}
+          <code className="rounded bg-stone-200 px-1">WIPE</code> to confirm.
+        </p>
+        <div className="mt-2 flex gap-2">
+          <input
+            value={wipeText}
+            onChange={(e) => setWipeText(e.target.value)}
+            placeholder="WIPE"
+            className="flex-1 rounded-md border border-stone-300 bg-white px-3 py-1.5 text-sm outline-none focus:border-stone-500"
+          />
+          <button
+            type="button"
+            onClick={wipe}
+            disabled={wipeText !== "WIPE" || wipeBusy}
+            className="rounded-md bg-red-700 px-3 py-1.5 text-sm text-white hover:bg-red-800 disabled:opacity-40"
+          >
+            {wipeBusy ? "Wiping…" : "Wipe local data"}
+          </button>
+        </div>
+      </div>
+
+      {message && (
+        <div
+          className={
+            "rounded-md border px-3 py-2 text-xs " +
+            (message.kind === "ok"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : "border-amber-200 bg-amber-50 text-amber-800")
+          }
+        >
+          {message.text}
+        </div>
+      )}
     </div>
   );
 }

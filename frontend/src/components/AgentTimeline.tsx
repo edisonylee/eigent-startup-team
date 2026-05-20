@@ -1,9 +1,12 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useTimeline } from "../lib/queries";
-import { ROLE_LABEL, Role } from "../store";
+import { ROLE_LABEL, Role, TimelineRow } from "../store";
 
 interface Props {
+  /** Read events from the DB via /api/runs/{taskId}/timeline. */
   taskId?: string;
+  /** Render these events directly (live-mode override). */
+  events?: TimelineRow[];
 }
 
 const ROLE_COLOR: Record<string, string> = {
@@ -13,33 +16,48 @@ const ROLE_COLOR: Record<string, string> = {
   summarizer: "bg-emerald-100 text-emerald-800",
 };
 
-export default function AgentTimeline({ taskId }: Props) {
-  const { data: events, isLoading, error } = useTimeline(taskId);
+export default function AgentTimeline({ taskId, events }: Props) {
+  // Live mode: caller passes the event array directly (e.g. from
+  // store.eventLog while a run is in progress). Skip the DB fetch.
+  const liveMode = events !== undefined;
+  const dbQuery = useTimeline(liveMode ? undefined : taskId);
+
+  if (liveMode) {
+    if (!events || events.length === 0) {
+      return (
+        <div className="text-xs text-stone-400">
+          Waiting for the first event…
+        </div>
+      );
+    }
+    return <Render rows={events} />;
+  }
 
   if (!taskId)
     return (
-      <div className="text-xs text-stone-400">
-        No task selected.
-      </div>
+      <div className="text-xs text-stone-400">No task selected.</div>
     );
-
-  if (isLoading)
+  if (dbQuery.isLoading)
     return <div className="text-sm text-stone-500">loading timeline…</div>;
-  if (error)
+  if (dbQuery.error)
     return (
       <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
-        {String(error)}
+        {String(dbQuery.error)}
       </div>
     );
-  if (!events || events.length === 0)
+  const rows = dbQuery.data || [];
+  if (rows.length === 0)
     return (
       <div className="text-xs text-stone-400">No events recorded yet.</div>
     );
+  return <Render rows={rows} />;
+}
 
+function Render({ rows }: { rows: TimelineRow[] }) {
   return (
     <div className="overflow-hidden rounded-lg border border-stone-200 bg-white">
       <AnimatePresence initial>
-        {events.map((ev, i) => (
+        {rows.map((ev, i) => (
           <motion.div
             key={ev.id}
             initial={{ opacity: 0, x: -8 }}

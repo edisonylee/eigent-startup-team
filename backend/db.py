@@ -425,6 +425,73 @@ async def list_check_ins(limit: int = 30) -> list[dict]:
     return await asyncio.to_thread(list_check_ins_sync, limit)
 
 
+# --- biomarkers ---------------------------------------------------------------
+
+
+def add_biomarkers_sync(
+    profile_id: int, biomarkers: list[dict], recorded_at: Optional[float] = None
+) -> list[int]:
+    """Append a panel of parsed biomarker rows.
+
+    `biomarkers` items are Pydantic `Biomarker`-shaped dicts (name, value,
+    unit, reference_range, flag). The Pydantic field is `reference_range`
+    but the SQL column is `ref_range` — translated here.
+    Returns the new row ids so callers can trigger entity extraction.
+    """
+    ts = recorded_at if recorded_at is not None else time.time()
+    ids: list[int] = []
+    with _connect() as conn:
+        for b in biomarkers:
+            cur = conn.execute(
+                "INSERT INTO biomarker(profile_id, name, value, unit, ref_range, "
+                "flag, recorded_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                (
+                    profile_id,
+                    b.get("name"),
+                    str(b.get("value", "")),
+                    b.get("unit"),
+                    b.get("reference_range") or b.get("ref_range"),
+                    b.get("flag") or "unknown",
+                    ts,
+                ),
+            )
+            ids.append(cur.lastrowid)
+        conn.commit()
+    return ids
+
+
+def list_recent_biomarkers_sync(limit: int = 60) -> list[dict]:
+    """Latest row per biomarker name, newest panel first."""
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT b.id, b.name, b.value, b.unit, b.ref_range, b.flag, b.recorded_at
+            FROM biomarker b
+            JOIN (
+                SELECT name, MAX(recorded_at) AS mx
+                FROM biomarker GROUP BY name
+            ) latest
+              ON latest.name = b.name AND latest.mx = b.recorded_at
+            ORDER BY b.recorded_at DESC, b.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+async def add_biomarkers(
+    profile_id: int, biomarkers: list[dict], recorded_at: Optional[float] = None
+) -> list[int]:
+    return await asyncio.to_thread(
+        add_biomarkers_sync, profile_id, biomarkers, recorded_at
+    )
+
+
+async def list_recent_biomarkers(limit: int = 60) -> list[dict]:
+    return await asyncio.to_thread(list_recent_biomarkers_sync, limit)
+
+
 # --- events -------------------------------------------------------------------
 
 

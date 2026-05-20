@@ -28,6 +28,7 @@ export interface RunEvent {
     | "worker_usage"
     | "tool_call"
     | "human_input_required"
+    | "human_input_timeout"
     | "task_complete"
     | "error";
   role?: Role;
@@ -52,6 +53,8 @@ export interface RunEvent {
   question?: string;
   choices?: string[];
   request_id?: string;
+  // human_input_timeout: agent gave up waiting and proceeded with a default.
+  answer?: string;
 }
 
 export interface AgentQuestion {
@@ -299,6 +302,16 @@ export const useStore = create<Store>((set) => ({
           ],
         };
         return merge({ workers });
+      }
+
+      if (e.type === "human_input_timeout" && e.request_id) {
+        // Agent gave up waiting and proceeded with the default. Drop the
+        // pending modal if it's still showing this question.
+        return merge({
+          questionQueue: s.questionQueue.filter(
+            (q) => q.request_id !== e.request_id,
+          ),
+        });
       }
 
       if (e.type === "human_input_required" && e.request_id && e.role) {

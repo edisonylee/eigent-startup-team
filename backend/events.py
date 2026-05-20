@@ -10,6 +10,7 @@ EventType = Literal[
     "tool_call",
     "human_input_required",
     "human_input_answered",
+    "human_input_timeout",
     "task_complete",
     "error",
 ]

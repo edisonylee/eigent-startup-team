@@ -2,11 +2,13 @@
 the built React frontend as a single deployable service.
 """
 
+import asyncio
 import csv
 import io
 import os
 import pathlib
 import shutil
+import threading
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -222,7 +224,32 @@ async def labs(
         )
 
     panel = parse_labs(extracted)
+
+    if panel.biomarkers:
+        profile = await db.get_profile()
+        profile_id = profile["id"] if profile else (await db.upsert_profile({}))["id"]
+        rows = [b.model_dump() for b in panel.biomarkers]
+        new_ids = await db.add_biomarkers(profile_id, rows)
+
+        def _bg() -> None:
+            try:
+                from . import personal_entities as _pe
+
+                _pe.index_biomarker_ids_sync(new_ids)
+            except Exception:
+                pass
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     return panel.model_dump()
+
+
+@app.get("/api/biomarkers/recent")
+async def biomarkers_recent(limit: int = 60) -> dict:
+    """Latest biomarker row per name. Lets the home screen rehydrate
+    the BiomarkerTable on reload after a lab upload."""
+    rows = await db.list_recent_biomarkers(limit)
+    return {"biomarkers": rows}
 
 
 @app.get("/api/run/{task_id}/events")
@@ -326,6 +353,46 @@ async def profile_post(req: ProfileRequest) -> dict:
         raise HTTPException(status_code=401, detail="Wrong password.")
     data = req.model_dump(exclude={"password"}, exclude_none=True)
     return await db.upsert_profile(data)
+
+
+@app.get("/api/profile/synthesis")
+async def profile_synthesis_get() -> dict:
+    """Return the auto-synthesized About-me + cached metadata.
+
+    `notes` is the synthesis text (the same field as profile.notes —
+    the synthesizer writes to it). `synthesized_at` is the unix ts of
+    the last roll, plus per-source counts used.
+    """
+    from . import profile_synthesis as ps
+    profile = await db.get_profile()
+    meta = ps.get_synthesis_meta_sync()
+    return {
+        "notes": (profile or {}).get("notes"),
+        **meta,
+    }
+
+
+class SynthesizeRequest(BaseModel):
+    password: str
+
+
+@app.post("/api/profile/synthesize")
+async def profile_synthesize_post(req: SynthesizeRequest) -> dict:
+    """Force a synthesis pass now. Runs synchronously and returns the result.
+
+    The triggers on check-in and run completion are async/daemon, so this
+    endpoint exists for manual refresh from the UI (and for tests).
+    """
+    if not _password_ok(req.password):
+        raise HTTPException(status_code=401, detail="Wrong password.")
+    from . import profile_synthesis as ps
+    result = await asyncio.to_thread(ps.synthesize_profile_sync)
+    if result is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No source data to synthesize from yet — log a check-in or run a plan first.",
+        )
+    return result
 
 
 # --- check-ins ----------------------------------------------------------------
@@ -464,7 +531,12 @@ async def check_ins_post(req: CheckInRequest) -> dict:
     if not _password_ok(req.password):
         raise HTTPException(status_code=401, detail="Wrong password.")
     data = req.model_dump(exclude={"password"}, exclude_none=True)
-    return await db.add_check_in(data)
+    row = await db.add_check_in(data)
+    # Roll the profile synthesis forward in the background — never blocks
+    # the request. Same daemon-thread pattern as runner._spawn_entity_extract.
+    from . import profile_synthesis
+    profile_synthesis.spawn_profile_synthesis()
+    return row
 
 
 @app.get("/api/prompts")

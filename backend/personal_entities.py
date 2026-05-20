@@ -257,13 +257,48 @@ async def index_text(text: str, source_kind: str, source_id: str) -> int:
     return await asyncio.to_thread(index_text_sync, text, source_kind, source_id)
 
 
+def index_biomarker_ids_sync(row_ids: list[int]) -> int:
+    """Index a specific set of newly-inserted biomarker rows.
+
+    Mirrors the biomarker block in `index_existing_data_sync` but scoped
+    to a single panel so a lab upload doesn't re-walk all sources.
+    """
+    if not row_ids:
+        return 0
+    placeholders = ",".join("?" for _ in row_ids)
+    indexed = 0
+    with _connect() as conn:
+        for r in conn.execute(
+            f"SELECT id, name, value, unit, flag FROM biomarker WHERE id IN ({placeholders})",
+            row_ids,
+        ).fetchall():
+            display = r["name"]
+            cid = _canonical_index().get(display.lower())
+            canonical_id = cid[0] if cid else None
+            ctype = cid[1] if cid else "biomarker"
+            eid = _upsert_entity_sync(display, ctype, canonical_id)
+            unit = r["unit"] or ""
+            flag = r["flag"] or "unknown"
+            snippet = f"{display}: {r['value']} {unit} [{flag}]"
+            _add_mention_sync(eid, "lab_biomarker", str(r["id"]), snippet)
+            indexed += 1
+    return indexed
+
+
 # ---------- One-shot indexer over existing SQLite data ----------
 
 def index_existing_data_sync() -> dict:
-    """Walk run.memo, check_in.adherence_notes, profile.notes, biomarker
-    and persist mentions. Idempotent re entity rows; mention rows accumulate.
-    Use the `clear` flag (via the API) if you need a clean slate."""
-    counts = {"run_memos": 0, "check_ins": 0, "profile": 0, "biomarkers": 0}
+    """Walk run.memo, check_in.adherence_notes, profile.notes, biomarker,
+    and event.description and persist mentions. Idempotent re entity rows;
+    mention rows accumulate. Use the `clear` flag (via the API) if you
+    need a clean slate."""
+    counts = {
+        "run_memos": 0,
+        "check_ins": 0,
+        "profile": 0,
+        "biomarkers": 0,
+        "events": 0,
+    }
 
     with _connect() as conn:
         # Plan memos
@@ -305,6 +340,17 @@ def index_existing_data_sync() -> dict:
             snippet = f"{display}: {r['value']} {unit} [{flag}]"
             _add_mention_sync(eid, "lab_biomarker", str(r["id"]), snippet)
             counts["biomarkers"] += 1
+
+        # Events — any free-form description (notes, symptoms, meals, etc.)
+        # The `note` category is the most prose-heavy, but everything with
+        # a description carries entity signal worth extracting.
+        for r in conn.execute(
+            "SELECT id, category, description FROM event "
+            "WHERE description IS NOT NULL AND description != ''"
+        ).fetchall():
+            text = f"[{r['category']}] {r['description']}"
+            n = index_text_sync(text, "event_note", str(r["id"]))
+            counts["events"] += n
 
     return counts
 

@@ -9,6 +9,8 @@ import WorkerDrawer from "./components/WorkerDrawer";
 import { Button } from "./components/ui/Button";
 import { Card } from "./components/ui/Card";
 import { Input, Textarea } from "./components/ui/Input";
+import { api } from "./lib/api";
+import { useProfileSynthesis } from "./lib/queries";
 import { streamRun } from "./lib/sse";
 import { selectTotalCost, useStore } from "./store";
 
@@ -46,6 +48,29 @@ export default function App() {
       .then((p) => p && setPrompts(p))
       .catch(() => {});
   }, [prompts, setPrompts]);
+
+  // Hydrate the most recent persisted lab panel so reloads don't drop labs.
+  useEffect(() => {
+    if (labPanel) return;
+    api
+      .recentBiomarkers()
+      .then((rows) => {
+        if (!rows.length) return;
+        setLabPanel({
+          lab_name: null,
+          date: null,
+          biomarkers: rows.map((r) => ({
+            name: r.name,
+            value: r.value,
+            unit: r.unit,
+            reference_range: null,
+            flag: (r.flag as "normal" | "low" | "high" | "unknown") ?? "unknown",
+          })),
+        });
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (phase !== "running" || !taskId || esRef.current) return;
@@ -214,12 +239,13 @@ export default function App() {
           </p>
         </Card>
 
+        <ProfileLoadedHint />
         <div className="mb-5 flex gap-2">
           <Input
             value={idea}
             onChange={(e) => setIdea(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && run()}
-            placeholder="Describe yourself — age, lifestyle, goals, any concerns. e.g. 34, desk job, want more energy and to lose 10 lbs, mild back pain"
+            placeholder="What do you want help with? e.g. 'Help me sleep better this week' · 'Lower my LDL over the next 3 months' · 'I have new lower back pain — what should I try first?'"
             disabled={busy}
           />
           <Button
@@ -227,7 +253,7 @@ export default function App() {
             disabled={busy || !idea.trim()}
             size="lg"
           >
-            {phase === "running" ? "Running…" : "Run"}
+            {phase === "running" ? "Running…" : "Ask"}
           </Button>
         </div>
 
@@ -340,6 +366,42 @@ export default function App() {
 
       <WorkerDrawer />
       <AgentQuestionModal onAnswer={submitAnswer} />
+    </div>
+  );
+}
+
+function ProfileLoadedHint() {
+  const { data } = useProfileSynthesis();
+  const hasSynthesis = !!data?.notes?.trim();
+  return (
+    <div className="mb-2 flex items-center gap-2 text-[11px] text-slate-gray">
+      <span
+        aria-hidden
+        className={
+          "inline-block h-1.5 w-1.5 rounded-full " +
+          (hasSynthesis ? "bg-status-success" : "bg-silver-mist")
+        }
+      />
+      {hasSynthesis ? (
+        <span>
+          Your profile is loaded — the agents already know about your check-ins,
+          past plans, and labs. Just ask the question.{" "}
+          <Link
+            to="/memory"
+            className="text-stone-gray underline-offset-2 hover:text-ink-black hover:underline"
+          >
+            See what they know →
+          </Link>
+        </span>
+      ) : (
+        <span>
+          No profile synthesis yet. Log a{" "}
+          <Link to="/today" className="text-stone-gray underline-offset-2 hover:text-ink-black hover:underline">
+            check-in
+          </Link>{" "}
+          first, or describe yourself in the prompt below.
+        </span>
+      )}
     </div>
   );
 }

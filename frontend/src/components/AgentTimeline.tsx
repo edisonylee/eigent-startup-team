@@ -172,6 +172,25 @@ function Row({
     );
   }
 
+  if (event.kind === "human_input_timeout") {
+    return (
+      <div>
+        {meta}
+        <div className="mt-1 rounded-default border border-status-error/30 bg-status-error/5 px-3 py-2">
+          <div className="text-[10px] uppercase tracking-[0.2em] text-status-error">
+            No answer — agent proceeded on default
+          </div>
+          <div className="mt-0.5 text-body text-ink-black">
+            “{event.payload.question}”
+          </div>
+          <div className="mt-1 text-[12px] text-slate-gray">
+            Default used: <span className="font-mono">{event.payload.answer}</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (event.kind === "worker_usage") {
     return (
       <div>

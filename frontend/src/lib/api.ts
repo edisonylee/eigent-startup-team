@@ -121,6 +121,36 @@ export interface CheckIn {
   created_at: number;
 }
 
+export interface ProfileSynthesis {
+  notes: string | null;
+  synthesized_at: number | null;
+  check_ins: number;
+  run_memos: number;
+  biomarkers: number;
+}
+
+export interface BiomarkerRow {
+  name: string;
+  value: string;
+  unit: string | null;
+  flag: string | null;
+  recorded_at: number;
+}
+
+export interface MemoryGraphSources {
+  check_ins: CheckIn[];
+  run_memos: {
+    task_id: string;
+    idea: string | null;
+    memo: string | null;
+    started_at: number | null;
+    ended_at: number | null;
+    status: string | null;
+  }[];
+  profile: ProfileSynthesis;
+  biomarkers: BiomarkerRow[];
+}
+
 async function jsonFetch<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, {
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) },
@@ -167,6 +197,18 @@ export const api = {
   profile: () => jsonFetch<Record<string, unknown>>("/api/profile"),
   saveProfile: (body: Record<string, unknown> & { password: string }) =>
     jsonFetch("/api/profile", { method: "POST", body: JSON.stringify(body) }),
+  profileSynthesis: () =>
+    jsonFetch<ProfileSynthesis>("/api/profile/synthesis"),
+  synthesizeProfile: (body: { password: string }) =>
+    jsonFetch<ProfileSynthesis>("/api/profile/synthesize", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  recentBiomarkers: (limit = 60) =>
+    jsonFetch<{ biomarkers: BiomarkerRow[] }>(
+      `/api/biomarkers/recent?limit=${limit}`,
+    ).then((r) => r.biomarkers),
 
   checkIns: (limit = 30) =>
     jsonFetch<{ check_ins: CheckIn[] }>(`/api/check_ins?limit=${limit}`).then(
@@ -193,6 +235,8 @@ export const api = {
       "/api/memory-graph/reindex",
       { method: "POST", body: JSON.stringify(body) },
     ),
+  memoryGraphSources: () =>
+    jsonFetch<MemoryGraphSources>("/api/memory-graph/sources"),
 
   // v3 — events / calendar
   events: (params: {

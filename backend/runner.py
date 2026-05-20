@@ -289,8 +289,18 @@ def _make_question_tool(
             )
         )
 
-        ev.wait(timeout=_QUESTION_TIMEOUT_S)
+        answered = ev.wait(timeout=_QUESTION_TIMEOUT_S)
         _pending_questions.pop(rid, None)
+        if not answered:
+            emit(
+                RunEvent(
+                    type="human_input_timeout",
+                    role=role,
+                    question=question,
+                    answer=slot["answer"],
+                    request_id=rid,
+                )
+            )
         return slot["answer"]
 
     return FunctionTool(request_human_input)
@@ -699,16 +709,31 @@ async def _run(task_id: str, idea: str, biomarkers: List[dict]) -> None:
         emit(RunEvent(type="task_started"))
 
         biomarker_block = _format_biomarkers(biomarkers)
-        profile_text = idea
+        # Auto-apply the rolling profile synthesis. This is the agents' working
+        # model of who the user is, built from their check-ins + run memos +
+        # biomarkers + the memory graph. The user's `idea` is now just the
+        # question/goal for THIS run — they don't need to redescribe themselves.
+        profile_row = db.get_profile_sync()
+        synthesis = ((profile_row or {}).get("notes") or "").strip()
+
+        sections: list[str] = []
+        if synthesis:
+            sections.append(
+                "About this person (auto-synthesized from their longitudinal "
+                "data — check-ins, prior plans, biomarkers, and the memory "
+                "graph of recurring entities in their life):\n\n" + synthesis
+            )
         if biomarker_block:
-            profile_text = f"{idea}\n\n{biomarker_block}"
+            sections.append("Current biomarkers:\n" + biomarker_block)
+        sections.append("This run's focus / question:\n" + idea)
+        profile_text = "\n\n---\n\n".join(sections)
 
         task = Task(
             content=(
                 "Produce a structured personalized health plan for this "
                 "person. Research evidence-based guidance, assess their focus "
                 "areas, review the plan for safety, and write the final "
-                f"plan.\n\nProfile: {profile_text}"
+                f"plan.\n\n{profile_text}"
             ),
             id="root",
         )
@@ -728,6 +753,10 @@ async def _run(task_id: str, idea: str, biomarkers: List[dict]) -> None:
         # v3: extract personal entities in the background — fire-and-forget so
         # the LLM call doesn't extend the SSE lifecycle. Failures swallowed.
         _spawn_entity_extract(memo, "run_memo", task_id)
+        # v3: roll the auto-synthesized "About me" forward now that there's
+        # a new memo in the corpus. Same daemon-thread pattern.
+        from . import profile_synthesis
+        profile_synthesis.spawn_profile_synthesis()
 
     except Exception as exc:  # surface failures to the UI instead of hanging
         emit(RunEvent(type="error", text=f"{type(exc).__name__}: {exc}"))
@@ -862,6 +891,8 @@ async def _run_followup(new_task_id: str, orig_task_id: str, note: str) -> None:
         )
         # v3: extract personal entities in the background — same as _run.
         _spawn_entity_extract(new_memo, "run_memo", new_task_id)
+        from . import profile_synthesis
+        profile_synthesis.spawn_profile_synthesis()
 
     except Exception as exc:
         emit(RunEvent(type="error", text=f"{type(exc).__name__}: {exc}"))

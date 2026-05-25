@@ -37,7 +37,7 @@ shell.
 │ Ask  (single agent)      │  │ Plan  (full Workforce)               │
 │ - ASK_PROMPT             │  │ - Researcher → Assessor →            │
 │ - profile auto-loaded    │  │   Safety Reviewer → Plan Writer      │
-│ - search_health_kb tool  │  │ - real MCP tools, mid-run HITL,      │
+│ - no tools, no retrieval │  │ - real MCP tools, mid-run HITL,      │
 │ - ~$0.005, ~10s          │  │   curated KB + DuckDuckGo fallback   │
 │ - prose answer           │  │ - ~$0.01–0.05, ~1–3 min              │
 │                          │  │ - structured markdown plan           │
@@ -55,7 +55,7 @@ this time?"
 |---|---|---|
 | **`/today`** | Daily check-in (energy/sleep/mood/notes) + a calendar showing every check-in (orange ring) and every event (category dot). Click any day → modal with the day's check-in + events + an "Add note or event" form. | `check_in`, `event` |
 | **`/memory`** | Tabbed view: **About me** (the synthesis), **Graph** (force-directed entity graph, sources inlined), **History** (chronological event log). | reads only |
-| **`/ask`** | Chat-style Q&A. One `ChatAgent` with `ASK_PROMPT`, profile synthesis auto-loaded, `search_health_kb` tool available. Streams a 1–3 paragraph answer. | `run` (`mode='ask'`) |
+| **`/ask`** | Chat-style Q&A. One `ChatAgent` with `ASK_PROMPT`, profile synthesis auto-loaded, **no tools** — the synthesis is the entire grounding. Streams a 1–3 paragraph answer. | `run` (`mode='ask'`) |
 | **`/plan`** | Past plans + "Start a new plan →" which opens `/plan/new` — the full Workforce composer with live agent timeline, lab upload, mid-run HITL, follow-up input. | `run` (`mode='plan'`) |
 | `/settings` | Model backend (OpenAI/Ollama), MCP server status, profile, data export/wipe. | settings + profile |
 | `/runs/:taskId/timeline` | Full chronological view of any past run. | reads only |
@@ -105,7 +105,7 @@ search still uses cloud unless you also drop the Brave MCP server.)
 | | `Ask` | `Plan` |
 |---|---|---|
 | Agents | 1 `ChatAgent` (`ASK_PROMPT`) | 4-agent Workforce (Researcher → Assessor → Safety Reviewer → Plan Writer) |
-| Tools | `search_health_kb` only | Curated KB, canonical health graph, personal memory graph, notes filesystem, Brave (opt-in), DuckDuckGo fallback, `request_human_input` |
+| Tools | none — the synthesis is the grounding | Curated KB, canonical health graph, personal memory graph, notes filesystem, Brave (opt-in), DuckDuckGo fallback, `request_human_input` |
 | Web search | no | DuckDuckGo always; Brave when configured |
 | Profile auto-loaded? | yes (synthesis prepended to user input) | yes (synthesis prepended to task content) |
 | Latency | ~5–15s | ~1–3 min |
@@ -146,10 +146,10 @@ forget on a daemon thread, same pattern as `_spawn_entity_extract`):
 That single paragraph then gets prepended to the user input of every
 subsequent Ask and Plan — the agents never see a freshly-typed bio.
 
-### Memory graph (entities + sources)
+### Memory graph (entities + observations)
 
-`backend/personal_entities.py` extracts entities from five source kinds
-and stores them in `personal_entity` + `entity_mention`:
+`backend/personal_entities.py` builds nodes from seven source kinds and
+stores them in `personal_entity` + `entity_mention`:
 
 | Source kind | Where it comes from |
 |---|---|
@@ -158,19 +158,27 @@ and stores them in `personal_entity` + `entity_mention`:
 | `profile_note` | `profile.notes` (i.e. the synthesis itself) |
 | `lab_biomarker` | `biomarker.name` |
 | `event_note` | `event.description` (any category — note, meal, symptom, …) |
+| `check_in_observation` | check-in scalars bucketed into `low/mid/high {sleep,energy,mood}` nodes |
+| `event_observation` | scalar event meta (sleep hours, mood, symptom severity), bucketed the same way |
+
+So the graph fuses two node shapes: **named entities** (nutrients,
+providers, foods, …) and **observation buckets** (stable `low/mid/high`
+nodes for how the user actually feels).
 
 Extraction is two-phase: rule-based matching against
 `data/health_graph.yaml` aliases (high-precision, no LLM) plus a typed
 Pydantic `EntityExtraction` LLM call for open-set types
-(`provider`, `place`, `person`, `activity`, `other`). Edges between
-nodes are computed on the fly as co-mentions: any two entities that
-appear in the same `(source_kind, source_id)` get an edge, weighted by
-co-occurrence count.
+(`provider`, `place`, `person`, `activity`, `other`). Edges are computed
+two ways and summed: **same-source co-mention** (two entities in the same
+`(source_kind, source_id)`) and **same-day co-occurrence** (entities
+mentioned on the same calendar day across different sources) — the latter
+is what links a "magnesium" note to the "high sleep" bucket from the same
+day's check-in.
 
 The viz on `/memory` → Graph uses `react-force-graph-2d`. Per-type
-colors map to a 10-bucket palette; canonical-matched entities get a
-white ring so the user sees the overlap between their personal graph
-and the curated ontology.
+colors map to a 10-bucket palette (observations pink); canonical-matched
+entities get a white ring so the user sees the overlap between their
+personal graph and the curated ontology.
 
 ### Calendar + events
 
@@ -235,7 +243,7 @@ Each Workforce agent has a `request_human_input(question, choices)` tool.
 When the agent decides it needs clarification, the runner emits a
 `human_input_required` SSE event, the UI surfaces a question modal, and
 the tool's thread blocks on a `threading.Event` until
-`POST /api/run/{id}/answer` resolves it. "Use your best judgment" is
+`POST /api/run/{task_id}/answer` resolves it. "Use your best judgment" is
 always available — completed work is never thrown away.
 
 The timeline view renders question/answer pairs as a first-class row type
@@ -276,8 +284,8 @@ the shipped snapshot into place — first-run installs work without Firecrawl.
 
 ### Hand-curated knowledge graph
 
-`data/health_graph.yaml` → NetworkX `MultiDiGraph` at startup. 65+
-entities, 124+ typed edges (`addresses`, `found_in`, `measured_by`,
+`data/health_graph.yaml` → NetworkX `MultiDiGraph` at startup. 65
+entities, 124 typed edges (`addresses`, `found_in`, `measured_by`,
 `interacts_with`, `risk_factor_for`, `contraindicated_with`).
 Sub-millisecond traversal; queries embedded with the same local
 sentence-transformers model that powers the KB.
@@ -367,7 +375,7 @@ uv run python -m scripts.seed_memory_demo
 4. **PyInstaller backend bundling deferred.** Electron expects `uv` on PATH.
 5. **Multi-profile not modeled yet.** Schema has a single profile row; the synthesis is per-DB, not per-user.
 
-## Built for
+## Built on
 
-Interview prep for the AI agent / product engineer role at
-[Eigent](https://eigent.ai), built on [CAMEL-AI](https://www.camel-ai.org/).
+[CAMEL-AI](https://www.camel-ai.org/) — the multi-agent framework behind
+the `Workforce` orchestration, `ChatAgent`, and MCP tooling used throughout.
